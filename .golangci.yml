@@ -1,0 +1,31 @@
+linters:
+  enable:
+    - gofmt       # Проверяет форматирование кода (отступы, пробела и т.д.)
+    - golint      # Проверяет код на соответствие общепринятому стилю в Go
+    - interfacer
+    - megacheck   # Содержит 3 подлинтера: 
+        # unused - неиспользуемые переменные, функции и типы
+        # gosimple - упрощение кода
+        # staticcheck - различные проверки статического анализа
+    - misspell
+    - goimports # форматирование импортов
+    - gocritic
+    - bodyclose # проверяет, успешно ли закрыт Body ответа HTTP
+    - unconvert # ненужные преобразования типов
+linters-settings:
+  misspell:
+    locale: US
+    ignore-words:
+      - litre # константа для единицы измерения 'литр'
+  golint:
+    min-confidence: 0.9
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+    disabled-checks:
+      - unnamedResult
+      - paramTypeCombine
+      - docStub
+      - ptrToRefParam
+      - importShadow
