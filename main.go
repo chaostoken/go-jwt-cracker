@@ -11,29 +11,32 @@ import (
 	"math/big"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	tg "github.com/go-telegram-bot-api/telegram-bot-api"
 	"github.com/urfave/cli/v2"
 )
 
-var (
-	token        string
-	charset      string
-	maxChar      int
-	startID      int64
-	countWorkers int
-	tgChat       int64
-	tgToken      string
 
-	keywordListFile string
-
-	one    = big.NewInt(1)
-	combCh = make(chan string)
-)
 
 func main() {
-	quit := make(chan struct{})
+	var (
+		token        string
+		charset      string
+		maxChar      int
+		startID      int64
+		countWorkers int
+		tgChat       int64
+		tgToken      string
+
+		keywordListFile string
+
+		one    = big.NewInt(1)
+		numberCh = make(chan *big.Int)
+		findCh = make(chan struct{})
+	)
+
 	app := &cli.App{
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -137,21 +140,55 @@ func main() {
 				}
 			}
 
+			// generate combinations
+			combine := NewCombinator(elems,maxChar)
+
+			current := big.NewInt(1)
+			if startID != 0 {
+				current = big.NewInt(startID)
+			}
+
+			// logging attempts
 			go func() {
-				generateCombinations(elems, maxChar)
-				close(quit)
+				ticker := time.NewTicker(1 * time.Minute)
+				for range ticker.C {
+					// race condition when reading current but that not critical
+					log.Printf("check %d combinations", current)
+				}
+			}()
+			log.Printf("all combinations %d \n", combine.CombinationsCount())
+
+			// send numbers
+			go func(){
+				for {
+					select {
+					case <-findCh:
+						close(numberCh)
+						return
+					default:
+						if current.Cmp(combine.CombinationsCount()) == -1 {
+							numberCh<-current
+							current = new(big.Int).Add(current,one)
+						} else {
+							close(numberCh)
+							return
+						}
+					}
+				}
 			}()
 
 			// decode token
 			parts := strings.Split(token, ".")
 			message := []byte(parts[0] + "." + parts[1])
-			//sign := []byte(parts[2])
 			sign := make([]byte, base64.RawURLEncoding.DecodedLen(len(parts[2])))
 			base64.RawURLEncoding.Decode(sign, []byte(parts[2]))
 
+			var wg sync.WaitGroup
+			wg.Add(countWorkers)
 			for i := 0; i < countWorkers; i++ {
 				go func() {
-					for combo := range combCh {
+					for number := range numberCh {
+						combo := combine.ComboFromBigint(number)
 						hasher := hmac.New(sha256.New, []byte(combo))
 						hasher.Write(message)
 						sum := hasher.Sum(nil)
@@ -162,14 +199,15 @@ func main() {
 								client.Send(tg.NewMessage(tgChat, text))
 							}
 							log.Println(text)
+							findCh<- struct{}{}
 							break
 						}
 					}
-					close(quit)
+					wg.Done()
 				}()
 			}
 
-			<-quit
+			wg.Wait()
 
 			log.Println("Finished! (((")
 			return nil
@@ -182,68 +220,63 @@ func main() {
 	}
 }
 
-func generateCombinations(elems []string, length int) {
-	countChars := len(elems)
-	current := big.NewInt(1)
-	if startID != 0 {
-		current = big.NewInt(startID)
-	}
+type Combinator struct {
+	regs, totalRegs []*big.Int
+	elems []string
+}
 
-	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		for range ticker.C {
-			// race condition when reading current but that not critical
-			log.Printf("check %d combinations", current)
-		}
-	}()
+func NewCombinator(elems []string, length int) *Combinator {
+	c := new(Combinator)
+	c.elems = elems
+	alphabetCount := big.NewInt(int64(len(elems)))
 
 	combinations := big.NewInt(0)
-	alphabetCount := big.NewInt(int64(countChars))
-	var regs, totalRegs []*big.Int
 	for r := 0; length >= 0; r++ {
 		regNumber := new(big.Int).Exp(alphabetCount, big.NewInt(int64(r)), nil)
 		combinations = new(big.Int).Add(combinations, regNumber)
-		regs = append(regs, regNumber)
-		totalRegs = append(totalRegs, combinations)
+		c.regs = append(c.regs, regNumber)
+		c.totalRegs = append(c.totalRegs, combinations)
 		length--
 	}
 
 	// reverse
-	for i, j := 0, len(regs)-1; i < j; i, j = i+1, j-1 {
-		regs[i], regs[j] = regs[j], regs[i]
+	for i, j := 0, len(c.regs)-1; i < j; i, j = i+1, j-1 {
+		c.regs[i], c.regs[j] = c.regs[j], c.regs[i]
 	}
-	for i, j := 0, len(totalRegs)-1; i < j; i, j = i+1, j-1 {
-		totalRegs[i], totalRegs[j] = totalRegs[j], totalRegs[i]
+	for i, j := 0, len(c.totalRegs)-1; i < j; i, j = i+1, j-1 {
+		c.totalRegs[i], c.totalRegs[j] = c.totalRegs[j], c.totalRegs[i]
 	}
+	return c
+}
 
-	log.Printf("all combinations %d \n", combinations)
-
-	for current.Cmp(combinations) == -1 {
-		x := new(big.Int).Set(current)
-		var combo string
-		for i, tr := range totalRegs {
-			if current.Cmp(tr) == -1 {
-				continue
-			}
-
-			r := regs[i]
-			n := new(big.Int).Div(x, r).Int64()
-
-			// x - n*r
-			nr := new(big.Int).Mul(big.NewInt(-n), r)
-			xnr := new(big.Int).Add(x, nr)
-
-			// x-n*r < totalRegs[i+1]
-			if i < len(totalRegs)-1 && xnr.Cmp(totalRegs[i+1]) == -1 {
-				n = n - 1
-				nr = new(big.Int).Mul(big.NewInt(-n), r)
-				xnr = new(big.Int).Add(x, nr)
-			}
-
-			x = new(big.Int).Set(xnr)
-			combo = combo + elems[n-1]
+func (c *Combinator) ComboFromBigint(current *big.Int) string {
+	x := new(big.Int).Set(current)
+	var combo string
+	for i, tr := range c.totalRegs {
+		if x.Cmp(tr) == -1 {
+			continue
 		}
-		combCh <- combo
-		current = new(big.Int).Add(current, one)
+
+		r := c.regs[i]
+		n := new(big.Int).Div(x, r).Int64()
+
+		// x - n*r
+		nr := new(big.Int).Mul(big.NewInt(-n), r)
+		xnr := new(big.Int).Add(x, nr)
+
+		// x-n*r < totalRegs[i+1]
+		if i < len(c.totalRegs)-1 && xnr.Cmp(c.totalRegs[i+1]) == -1 {
+			n = n - 1
+			nr = new(big.Int).Mul(big.NewInt(-n), r)
+			xnr = new(big.Int).Add(x, nr)
+		}
+
+		x = new(big.Int).Set(xnr)
+		combo = combo + c.elems[n-1]
 	}
+	return combo
+}
+
+func (c *Combinator) CombinationsCount() *big.Int {
+	return c.totalRegs[0]
 }
