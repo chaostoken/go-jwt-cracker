@@ -1,4 +1,4 @@
-module gihub.com/chaostoken/go-jwt-cracker
+module github.com/chaostoken/go-jwt-cracker
 
 go 1.15
 
